@@ -310,7 +310,7 @@ def list_pictures(directory, ext='jpg|jpeg|bmp|png'):
 
 
 def make_balanced_batches(samples_size, batch_size, labels):
-    #print("Making balanced batches...")
+    print("Making balanced batches...")
     def chunkify(lst, n):
         if type(lst) == xrange:
             lst = list(lst)
@@ -347,7 +347,7 @@ def make_balanced_batches(samples_size, batch_size, labels):
     assert(len(l_all_ind) == nb_batch)
     l_all_ind = np.array(sum(l_all_ind, ()))
 
-    #print("Done making balanced batches...")
+    print("Done making balanced batches...")
     return l_all_ind
 
 class ImageDataGenerator(object):
