@@ -309,6 +309,47 @@ def list_pictures(directory, ext='jpg|jpeg|bmp|png'):
             if re.match('([\w]+\.(?:' + ext + '))', f)]
 
 
+def make_balanced_batches(samples_size, batch_size, labels):
+    #print("Making balanced batches...")
+    def chunkify(lst, n):
+        if type(lst) == xrange:
+            lst = list(lst)
+        return [lst[i::n] for i in xrange(n)]
+    assert(labels.shape[0] == samples_size)
+    nb_batch = int(np.ceil(samples_size/float(batch_size)))
+    l_classes = np.unique(labels)
+    n_classes = len(l_classes)
+    chunks_per_cl = chunkify(range(batch_size), n_classes)
+
+    l_all_ind = []
+    for i_batch in range(nb_batch):
+        perm_cl = np.random.permutation(l_classes)
+        l_ind = []
+        #print("Progress: %f" % (i_batch/float(nb_batch)))
+        for i_cl, cl in enumerate(perm_cl):
+            n_chunks = len(chunks_per_cl[i_cl])
+            # indexes in the label array corresponding to class cl
+            ind_of_class = np.where(labels == cl)[0]
+            # random permute indexes
+            perm_cl_ind = np.random.permutation(ind_of_class)
+            # and take only n_chunks
+            perm_cl_ind = list(perm_cl_ind[:n_chunks])
+            # if n_chunks not available, keep adding 1 random number at a time until I reac
+            # n_chunks
+            while len(perm_cl_ind) < n_chunks:
+                ind = np.random.permutation(ind_of_class)[0]
+                perm_cl_ind.append(ind)
+            l_ind.append(perm_cl_ind)
+        l_ind = tuple(sum(l_ind, []))
+        l_all_ind.append(l_ind)
+        assert(len(l_ind) == batch_size)
+    l_all_ind = tuple(l_all_ind)
+    assert(len(l_all_ind) == nb_batch)
+    l_all_ind = np.array(sum(l_all_ind, ()))
+
+    #print("Done making balanced batches...")
+    return l_all_ind
+
 class ImageDataGenerator(object):
     """Generate minibatches of image data with real-time data augmentation.
 
@@ -415,7 +456,8 @@ class ImageDataGenerator(object):
                              'Received arg: ', zoom_range)
 
     def flow(self, X, y=None, batch_size=32, shuffle=True, seed=None,
-             save_to_dir=None, save_prefix='', save_format='jpeg'):
+             save_to_dir=None, save_prefix='', save_format='jpeg', 
+             balanced_classes = False):
         return NumpyArrayIterator(
             X, y, self,
             batch_size=batch_size,
@@ -424,7 +466,8 @@ class ImageDataGenerator(object):
             dim_ordering=self.dim_ordering,
             save_to_dir=save_to_dir,
             save_prefix=save_prefix,
-            save_format=save_format)
+            save_format=save_format,
+            balanced_classes = balanced_classes)
 
     def flow_from_directory(self, directory,
                             target_size=(256, 256), color_mode='rgb',
@@ -619,20 +662,28 @@ class ImageDataGenerator(object):
 
 class Iterator(object):
 
-    def __init__(self, n, batch_size, shuffle, seed):
+    def __init__(self, n, batch_size, shuffle, seed, targets = None):
         self.n = n
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.batch_index = 0
         self.total_batches_seen = 0
         self.lock = threading.Lock()
-        self.index_generator = self._flow_index(n, batch_size, shuffle, seed)
+        if targets is not None:
+            self.index_generator = self._flow_index_balanced(n, 
+                    batch_size, 
+                    shuffle, 
+                    seed, 
+                    targets = targets)
+        else:
+            self.index_generator = self._flow_index(n, batch_size, shuffle, seed)
 
     def reset(self):
         self.batch_index = 0
 
     def _flow_index(self, n, batch_size=32, shuffle=False, seed=None):
         # ensure self.batch_index is 0
+
         self.reset()
         while 1:
             if seed is not None:
@@ -641,6 +692,29 @@ class Iterator(object):
                 index_array = np.arange(n)
                 if shuffle:
                     index_array = np.random.permutation(n)
+
+            current_index = (self.batch_index * batch_size) % n
+            if n >= current_index + batch_size:
+                current_batch_size = batch_size
+                self.batch_index += 1
+            else:
+                current_batch_size = n - current_index
+                self.batch_index = 0
+            self.total_batches_seen += 1
+            yield (index_array[current_index: current_index + current_batch_size],
+                   current_index, current_batch_size)
+
+    def _flow_index_balanced(self, n, batch_size=32, shuffle=False, seed=None, targets = None):
+        # ensure self.batch_index is 0
+        self.reset()
+        while 1:
+            if seed is not None:
+                np.random.seed(seed + self.total_batches_seen)
+            if self.batch_index == 0:
+                index_array = np.arange(n)
+                if shuffle:
+                    #index_array = np.random.permutation(n)
+                    index_array = make_balanced_batches(n, batch_size, targets)
 
             current_index = (self.batch_index * batch_size) % n
             if n >= current_index + batch_size:
@@ -667,7 +741,8 @@ class NumpyArrayIterator(Iterator):
     def __init__(self, x, y, image_data_generator,
                  batch_size=32, shuffle=False, seed=None,
                  dim_ordering='default',
-                 save_to_dir=None, save_prefix='', save_format='jpeg'):
+                 save_to_dir=None, save_prefix='', save_format='jpeg',
+                 balanced_classes = False):
         if y is not None and len(x) != len(y):
             raise ValueError('X (images tensor) and y (labels) '
                              'should have the same length. '
@@ -697,7 +772,18 @@ class NumpyArrayIterator(Iterator):
         self.save_to_dir = save_to_dir
         self.save_prefix = save_prefix
         self.save_format = save_format
-        super(NumpyArrayIterator, self).__init__(x.shape[0], batch_size, shuffle, seed)
+
+        if balanced_classes:
+            super(NumpyArrayIterator, self).__init__(x.shape[0], 
+                    batch_size, 
+                    shuffle, 
+                    seed, 
+                    targets = y.argmax(axis = 1))
+        else:
+            super(NumpyArrayIterator, self).__init__(x.shape[0], 
+                    batch_size, 
+                    shuffle, 
+                    seed)
 
     def next(self):
         # for python 2.x.
@@ -725,6 +811,7 @@ class NumpyArrayIterator(Iterator):
         if self.y is None:
             return batch_x
         batch_y = self.y[index_array]
+        #print(batch_y.argmax(1))
         return batch_x, batch_y
 
 
